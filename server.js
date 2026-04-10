@@ -1,12 +1,12 @@
 const express = require('express');
 const fs = require('fs');
 const path = require('path');
-const https = require('https');
 const { McpServer } = require('@modelcontextprotocol/sdk/server/mcp.js');
 const { StreamableHTTPServerTransport } = require('@modelcontextprotocol/sdk/server/streamableHttp.js');
 
 const app = express();
 
+// CORS — allows Jammed admin tab to POST bookings during manual imports
 app.use(function(req, res, next) {
   res.header('Access-Control-Allow-Origin', '*');
   res.header('Access-Control-Allow-Methods', 'GET, POST, DELETE, OPTIONS');
@@ -17,10 +17,9 @@ app.use(function(req, res, next) {
 
 app.use(express.json());
 
+// Persistent storage on Render Disk — survives all restarts/redeploys forever
 const DATA_DIR = '/var/data';
 const DATA_FILE = path.join(DATA_DIR, 'bookings.json');
-const JAMMED_HOST = 'habitat-music-studios.jammed.app';
-
 if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
 
 function loadBookings() {
@@ -43,6 +42,10 @@ function saveBookings() {
 
 const bookingMap = loadBookings();
 
+// Normalise date field across all Jammed API formats:
+// b.start = "2025-01-13 15:00"  (admin API)
+// b.start_time = "2026-03-12 11:00" (webhook)
+// b.dates[0] = "2026-03-12" (webhook)
 function getDateStr(b) {
   return b.start || b.start_time || (b.dates && b.dates[0]) || '';
 }
@@ -61,50 +64,7 @@ function upsertBooking(data) {
 
 function getBookings() { return Object.values(bookingMap); }
 
-// Poll Jammed API for a date range and upsert all bookings
-function pollJammedRange(from, to) {
-  return new Promise(function(resolve) {
-    const path = '/admin/api/v1/bookings/by_dates.json?from=' + from + '&to=' + to;
-    const options = {
-      hostname: JAMMED_HOST,
-      path: path,
-      method: 'GET',
-      headers: { 'Accept': 'application/json' }
-    };
-    const req = https.request(options, function(res) {
-      let body = '';
-      res.on('data', function(chunk) { body += chunk; });
-      res.on('end', function() {
-        try {
-          const data = JSON.parse(body);
-          const bookings = Array.isArray(data) ? data : (data.bookings || []);
-          let count = 0;
-          bookings.forEach(function(b) { if (upsertBooking(b)) count++; });
-          if (count > 0) { saveBookings(); console.log('Poll ' + from + ' to ' + to + ': ' + count + ' new/updated'); }
-          resolve(bookings.length);
-        } catch(e) { console.error('Poll parse error:', e.message); resolve(0); }
-      });
-    });
-    req.on('error', function(e) { console.error('Poll error:', e.message); resolve(0); });
-    req.end();
-  });
-}
-
-// Every 2 hours: poll the next 60 days from Jammed to catch any missed webhooks
-async function scheduledPoll() {
-  console.log('Running scheduled poll...');
-  const now = new Date();
-  // Poll past 7 days + next 60 days to catch recent additions and future bookings
-  const from = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000).toISOString().split('T')[0];
-  const to = new Date(now.getTime() + 60 * 24 * 60 * 60 * 1000).toISOString().split('T')[0];
-  await pollJammedRange(from, to);
-  console.log('Scheduled poll complete. Total bookings: ' + Object.keys(bookingMap).length);
-}
-
-// Run on startup then every 2 hours
-scheduledPoll();
-setInterval(scheduledPoll, 2 * 60 * 60 * 1000);
-
+// Webhook receiver — Jammed fires this in real time via Svix on every booking event
 app.post('/webhook', function(req, res) {
   const data = req.body.data || req.body;
   const saved = upsertBooking(data);
@@ -114,16 +74,13 @@ app.post('/webhook', function(req, res) {
 
 app.get('/bookings', function(req, res) { res.json(getBookings()); });
 app.get('/bookings/count', function(req, res) { res.json({ count: Object.keys(bookingMap).length }); });
-app.get('/poll', async function(req, res) {
-  await scheduledPoll();
-  res.json({ done: true, total: Object.keys(bookingMap).length });
-});
 app.delete('/bookings', function(req, res) {
   Object.keys(bookingMap).forEach(function(k) { delete bookingMap[k]; });
   saveBookings();
   res.json({ cleared: true });
 });
 
+// MCP endpoint for Claude
 app.post('/mcp', async function(req, res) {
   const mcp = new McpServer({ name: 'jammed-bookings', version: '1.0.0' });
 
@@ -167,6 +124,6 @@ app.post('/mcp', async function(req, res) {
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, function() {
   console.log('Jammed MCP server running on port ' + PORT);
-  console.log('Disk: ' + DATA_FILE + ' | exists: ' + fs.existsSync(DATA_DIR));
-  console.log('Bookings loaded: ' + Object.keys(bookingMap).length);
+  console.log('Disk: ' + DATA_FILE + ' exists: ' + fs.existsSync(DATA_DIR));
+  console.log('Bookings on disk: ' + Object.keys(bookingMap).length);
 });
