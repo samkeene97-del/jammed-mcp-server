@@ -1,29 +1,65 @@
 const express = require('express');
-const https = require('https');
+const fs = require('fs');
+const path = require('path');
 const { McpServer } = require('@modelcontextprotocol/sdk/server/mcp.js');
 const { StreamableHTTPServerTransport } = require('@modelcontextprotocol/sdk/server/streamableHttp.js');
 
 const app = express();
 app.use(express.json());
 
-// Bookings stored by unique key (code + start_time) to avoid duplicates
-const bookingMap = {};
+// Persistent storage on Render Disk at /var/data
+const DATA_DIR = '/var/data';
+const DATA_FILE = path.join(DATA_DIR, 'bookings.json');
+
+// Ensure data directory exists
+if (!fs.existsSync(DATA_DIR)) {
+  fs.mkdirSync(DATA_DIR, { recursive: true });
+}
+
+// Load bookings from disk on startup
+function loadBookings() {
+  try {
+    if (fs.existsSync(DATA_FILE)) {
+      const raw = fs.readFileSync(DATA_FILE, 'utf8');
+      const data = JSON.parse(raw);
+      console.log(`Loaded ${Object.keys(data).length} bookings from disk`);
+      return data;
+    }
+  } catch (e) {
+    console.error('Failed to load bookings from disk:', e.message);
+  }
+  return {};
+}
+
+// Save bookings to disk
+function saveBookings() {
+  try {
+    fs.writeFileSync(DATA_FILE, JSON.stringify(bookingMap), 'utf8');
+  } catch (e) {
+    console.error('Failed to save bookings to disk:', e.message);
+  }
+}
+
+// Bookings stored by unique key to avoid duplicates
+const bookingMap = loadBookings();
 
 function upsertBooking(data) {
-  if (!data || !data.code) return;
+  if (!data || !data.code) return false;
   const key = data.code + '_' + (data.start_time || data.start_at || '');
   const existing = bookingMap[key];
-  // Keep the most recently updated version
   if (!existing || (data.updated_at && (!existing.updated_at || data.updated_at >= existing.updated_at))) {
     bookingMap[key] = data;
+    saveBookings();
+    return true;
   }
+  return false;
 }
 
 function getBookings() {
   return Object.values(bookingMap);
 }
 
-// Webhook receiver from Jammed via Svix
+// Webhook from Jammed via Svix
 app.post('/webhook', (req, res) => {
   const payload = req.body;
   const data = payload.data || payload;
@@ -35,56 +71,9 @@ app.get('/bookings', (req, res) => res.json(getBookings()));
 app.get('/bookings/count', (req, res) => res.json({ count: Object.keys(bookingMap).length }));
 app.delete('/bookings', (req, res) => {
   Object.keys(bookingMap).forEach(k => delete bookingMap[k]);
+  saveBookings();
   res.json({ cleared: true });
 });
-
-// Svix auto-recovery: fetch all messages from the last 72 hours every 2 hours
-// This ensures any missed webhooks are replayed automatically
-const SVIX_APP_ID = 'app_2pDRvJcjhMMJVFY2iCT08h0qU2g';
-const SVIX_ENDPOINT_ID = 'ep_3AiOhXWgfFimkmSsCZ8QtCHjtf2';
-const SVIX_TOKEN = process.env.SVIX_TOKEN;
-const SERVER_URL = process.env.SERVER_URL || 'https://jammed-mcp-server.onrender.com';
-
-async function svixReplay() {
-  if (!SVIX_TOKEN) {
-    console.log('SVIX_TOKEN not set - skipping auto-replay');
-    return;
-  }
-  try {
-    const since = new Date(Date.now() - 72 * 60 * 60 * 1000).toISOString();
-    const body = JSON.stringify({ since });
-    console.log('Running Svix replay since', since);
-
-    await new Promise((resolve, reject) => {
-      const req = https.request({
-        hostname: 'api.svix.com',
-        path: `/api/v1/app/${SVIX_APP_ID}/endpoint/${SVIX_ENDPOINT_ID}/recover/`,
-        method: 'POST',
-        headers: {
-          'Authorization': `Bearer ${SVIX_TOKEN}`,
-          'Content-Type': 'application/json',
-          'Content-Length': Buffer.byteLength(body)
-        }
-      }, res => {
-        let data = '';
-        res.on('data', chunk => data += chunk);
-        res.on('end', () => {
-          console.log('Svix replay response:', res.statusCode, data.substring(0, 200));
-          resolve();
-        });
-      });
-      req.on('error', reject);
-      req.write(body);
-      req.end();
-    });
-  } catch (err) {
-    console.error('Svix replay error:', err.message);
-  }
-}
-
-// Run replay on startup, then every 2 hours
-svixReplay();
-setInterval(svixReplay, 2 * 60 * 60 * 1000);
 
 // MCP endpoint
 app.post('/mcp', async (req, res) => {
@@ -126,12 +115,8 @@ app.post('/mcp', async (req, res) => {
 
   mcp.tool('clear_bookings', 'Clear all stored bookings', {}, async () => {
     Object.keys(bookingMap).forEach(k => delete bookingMap[k]);
+    saveBookings();
     return { content: [{ type: 'text', text: 'Bookings cleared' }] };
-  });
-
-  mcp.tool('trigger_replay', 'Manually trigger a Svix replay to refresh booking data', {}, async () => {
-    await svixReplay();
-    return { content: [{ type: 'text', text: 'Replay triggered. New bookings will arrive via webhook shortly.' }] };
   });
 
   const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined });
@@ -140,4 +125,7 @@ app.post('/mcp', async (req, res) => {
 });
 
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log('Jammed MCP server running on port ' + PORT));
+app.listen(PORT, () => {
+  console.log('Jammed MCP server running on port ' + PORT);
+  console.log('Bookings loaded from disk: ' + Object.keys(bookingMap).length);
+});
