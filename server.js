@@ -1,12 +1,12 @@
 const express = require('express');
 const fs = require('fs');
 const path = require('path');
+const { z } = require('zod');
 const { McpServer } = require('@modelcontextprotocol/sdk/server/mcp.js');
 const { StreamableHTTPServerTransport } = require('@modelcontextprotocol/sdk/server/streamableHttp.js');
 
 const app = express();
 
-// CORS — allows Jammed admin tab to POST bookings during manual imports
 app.use(function(req, res, next) {
   res.header('Access-Control-Allow-Origin', '*');
   res.header('Access-Control-Allow-Methods', 'GET, POST, DELETE, OPTIONS');
@@ -17,7 +17,6 @@ app.use(function(req, res, next) {
 
 app.use(express.json());
 
-// Persistent storage on Render Disk — survives all restarts/redeploys forever
 const DATA_DIR = '/var/data';
 const DATA_FILE = path.join(DATA_DIR, 'bookings.json');
 if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
@@ -42,10 +41,6 @@ function saveBookings() {
 
 const bookingMap = loadBookings();
 
-// Normalise date field across all Jammed API formats:
-// b.start = "2025-01-13 15:00"  (admin API)
-// b.start_time = "2026-03-12 11:00" (webhook)
-// b.dates[0] = "2026-03-12" (webhook)
 function getDateStr(b) {
   return b.start || b.start_time || (b.dates && b.dates[0]) || '';
 }
@@ -64,7 +59,6 @@ function upsertBooking(data) {
 
 function getBookings() { return Object.values(bookingMap); }
 
-// Webhook receiver — Jammed fires this in real time via Svix on every booking event
 app.post('/webhook', function(req, res) {
   const data = req.body.data || req.body;
   const saved = upsertBooking(data);
@@ -80,7 +74,6 @@ app.delete('/bookings', function(req, res) {
   res.json({ cleared: true });
 });
 
-// MCP endpoint for Claude
 app.post('/mcp', async function(req, res) {
   const mcp = new McpServer({ name: 'jammed-bookings', version: '1.0.0' });
 
@@ -94,7 +87,7 @@ app.post('/mcp', async function(req, res) {
     return { content: [{ type: 'text', text: JSON.stringify(todays) }] };
   });
 
-  mcp.tool('get_bookings_for_date', 'Get bookings for a specific date (YYYY-MM-DD)', { date: { type: 'string' } }, async function({ date }) {
+  mcp.tool('get_bookings_for_date', 'Get bookings for a specific date (YYYY-MM-DD)', { date: z.string().describe('Date in YYYY-MM-DD format') }, async function({ date }) {
     const matches = getBookings().filter(function(b) { return getDateStr(b).startsWith(date); });
     return { content: [{ type: 'text', text: JSON.stringify(matches) }] };
   });
@@ -124,6 +117,5 @@ app.post('/mcp', async function(req, res) {
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, function() {
   console.log('Jammed MCP server running on port ' + PORT);
-  console.log('Disk: ' + DATA_FILE + ' exists: ' + fs.existsSync(DATA_DIR));
   console.log('Bookings on disk: ' + Object.keys(bookingMap).length);
 });
