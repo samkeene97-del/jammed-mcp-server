@@ -1,5 +1,5 @@
 const express = require('express');
-const { Server } = require('@modelcontextprotocol/sdk/server/index.js');
+const { McpServer } = require('@modelcontextprotocol/sdk/server/mcp.js');
 const { SSEServerTransport } = require('@modelcontextprotocol/sdk/server/sse.js');
 
 const app = express();
@@ -20,24 +20,20 @@ app.post('/webhook', (req, res) => {
 app.get('/bookings', (req, res) => res.json(bookings));
 app.delete('/bookings', (req, res) => { bookings = []; res.json({ cleared: true }); });
 
-const server = new Server({ name: 'jammed-bookings', version: '1.0.0' }, { capabilities: { tools: {} } });
+const mcp = new McpServer({ name: 'jammed-bookings', version: '1.0.0' });
 
-server.setRequestHandler({ method: 'tools/list' }, async () => ({
-  tools: [
-    { name: 'get_bookings', description: 'Get all Habitat Studios bookings', inputSchema: { type: 'object', properties: {} } },
-    { name: 'get_todays_bookings', description: "Get today's bookings", inputSchema: { type: 'object', properties: {} } },
-    { name: 'clear_bookings', description: 'Clear all bookings', inputSchema: { type: 'object', properties: {} } }
-  ]
+mcp.tool('get_bookings', 'Get all Habitat Studios bookings', {}, async () => ({
+  content: [{ type: 'text', text: JSON.stringify(bookings) }]
 }));
 
-server.setRequestHandler({ method: 'tools/call' }, async (req) => {
-  const name = req.params.name;
-  if (name === 'get_bookings') return { content: [{ type: 'text', text: JSON.stringify(bookings) }] };
-  if (name === 'get_todays_bookings') {
-    const today = new Date().toISOString().split('T')[0];
-    return { content: [{ type: 'text', text: JSON.stringify(bookings.filter(b => b.start_time && b.start_time.startsWith(today))) }] };
-  }
-  if (name === 'clear_bookings') { bookings = []; return { content: [{ type: 'text', text: 'Cleared' }] }; }
+mcp.tool('get_todays_bookings', "Get today's bookings", {}, async () => {
+  const today = new Date().toISOString().split('T')[0];
+  return { content: [{ type: 'text', text: JSON.stringify(bookings.filter(b => b.start_time && b.start_time.startsWith(today))) }] };
+});
+
+mcp.tool('clear_bookings', 'Clear all stored bookings', {}, async () => {
+  bookings = [];
+  return { content: [{ type: 'text', text: 'Bookings cleared' }] };
 });
 
 const transports = {};
@@ -45,7 +41,7 @@ app.get('/mcp', async (req, res) => {
   const transport = new SSEServerTransport('/mcp/message', res);
   transports[transport.sessionId] = transport;
   res.on('close', () => delete transports[transport.sessionId]);
-  await server.connect(transport);
+  await mcp.connect(transport);
 });
 
 app.post('/mcp/message', async (req, res) => {
