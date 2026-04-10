@@ -77,22 +77,27 @@ app.delete('/bookings', function(req, res) {
 app.post('/mcp', async function(req, res) {
   const mcp = new McpServer({ name: 'jammed-bookings', version: '1.0.0' });
 
-  mcp.tool('get_bookings', 'Get all Habitat Studios bookings', {}, async function() {
-    return { content: [{ type: 'text', text: JSON.stringify(getBookings()) }] };
-  });
+  // NOTE: get_bookings removed — too large for MCP transport (4000+ records).
+  // Always use date-specific tools below instead.
 
   mcp.tool('get_todays_bookings', "Get today's bookings for Habitat Studios", {}, async function() {
     const today = new Date().toISOString().split('T')[0];
     const todays = getBookings().filter(function(b) { return getDateStr(b).startsWith(today); });
-    return { content: [{ type: 'text', text: JSON.stringify(todays) }] };
+    const summary = { date: today, count: todays.length, bookings: todays.map(function(b) {
+      return { name: b.name || b.title, room: b.room_name || (b.room && b.room.name), start: getDateStr(b), end: b.end || b.end_time };
+    })};
+    return { content: [{ type: 'text', text: JSON.stringify(summary) }] };
   });
 
-  mcp.tool('get_bookings_for_date', 'Get bookings for a specific date (YYYY-MM-DD)', { date: z.string().describe('Date in YYYY-MM-DD format') }, async function({ date }) {
+  mcp.tool('get_bookings_for_date', 'Get bookings for a specific date (YYYY-MM-DD format)', { date: z.string().describe('Date in YYYY-MM-DD format, e.g. 2026-04-12') }, async function({ date }) {
     const matches = getBookings().filter(function(b) { return getDateStr(b).startsWith(date); });
-    return { content: [{ type: 'text', text: JSON.stringify(matches) }] };
+    const summary = { date: date, count: matches.length, bookings: matches.map(function(b) {
+      return { name: b.name || b.title, room: b.room_name || (b.room && b.room.name), start: getDateStr(b), end: b.end || b.end_time };
+    })};
+    return { content: [{ type: 'text', text: JSON.stringify(summary) }] };
   });
 
-  mcp.tool('get_bookings_for_week', 'Get bookings for the next 7 days', {}, async function() {
+  mcp.tool('get_bookings_for_week', 'Get bookings for the next 7 days from today', {}, async function() {
     const now = new Date();
     const weekOut = new Date(now.getTime() + 7 * 24 * 60 * 60 * 1000);
     const matches = getBookings().filter(function(b) {
@@ -100,7 +105,20 @@ app.post('/mcp', async function(req, res) {
       const bd = new Date(d); return bd >= now && bd <= weekOut;
     });
     matches.sort(function(a, b) { return getDateStr(a) > getDateStr(b) ? 1 : -1; });
-    return { content: [{ type: 'text', text: JSON.stringify(matches) }] };
+    const summary = matches.map(function(b) {
+      return { name: b.name || b.title, room: b.room_name || (b.room && b.room.name), start: getDateStr(b), end: b.end || b.end_time };
+    });
+    return { content: [{ type: 'text', text: JSON.stringify({ count: summary.length, bookings: summary }) }] };
+  });
+
+  mcp.tool('get_bookings_summary', 'Get a summary of total bookings and date range in the system', {}, async function() {
+    const all = getBookings();
+    const dates = all.map(function(b) { return getDateStr(b); }).filter(Boolean).sort();
+    return { content: [{ type: 'text', text: JSON.stringify({
+      total: all.length,
+      earliest: dates[0] || 'none',
+      latest: dates[dates.length - 1] || 'none'
+    }) }] };
   });
 
   mcp.tool('clear_bookings', 'Clear all stored bookings', {}, async function() {
