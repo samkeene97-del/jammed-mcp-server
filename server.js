@@ -6,7 +6,6 @@ const { StreamableHTTPServerTransport } = require('@modelcontextprotocol/sdk/ser
 
 const app = express();
 
-// Allow CORS from anywhere (needed for Jammed admin import)
 app.use(function(req, res, next) {
   res.header('Access-Control-Allow-Origin', '*');
   res.header('Access-Control-Allow-Methods', 'GET, POST, DELETE, OPTIONS');
@@ -20,9 +19,7 @@ app.use(express.json());
 const DATA_DIR = '/var/data';
 const DATA_FILE = path.join(DATA_DIR, 'bookings.json');
 
-if (!fs.existsSync(DATA_DIR)) {
-  fs.mkdirSync(DATA_DIR, { recursive: true });
-}
+if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
 
 function loadBookings() {
   try {
@@ -31,28 +28,27 @@ function loadBookings() {
       const data = JSON.parse(raw);
       console.log('Loaded ' + Object.keys(data).length + ' bookings from disk');
       return data;
-    } else {
-      console.log('No bookings file on disk yet - starting fresh');
     }
-  } catch (e) {
-    console.error('Failed to load bookings:', e.message);
-  }
+    console.log('No bookings file on disk yet');
+  } catch (e) { console.error('Load error:', e.message); }
   return {};
 }
 
 function saveBookings() {
-  try {
-    fs.writeFileSync(DATA_FILE, JSON.stringify(bookingMap), 'utf8');
-  } catch (e) {
-    console.error('DISK WRITE FAILED:', e.message);
-  }
+  try { fs.writeFileSync(DATA_FILE, JSON.stringify(bookingMap), 'utf8'); }
+  catch (e) { console.error('DISK WRITE FAILED:', e.message); }
 }
 
 const bookingMap = loadBookings();
 
+// Get best date string from a booking regardless of Jammed API format
+function getDateStr(b) {
+  return b.start || b.start_time || (b.dates && b.dates[0]) || '';
+}
+
 function upsertBooking(data) {
   if (!data || !data.code) return false;
-  const timeKey = data.start_at || data.start_time || (data.dates && data.dates[0]) || 'unknown';
+  const timeKey = data.start_at || data.start || data.start_time || (data.dates && data.dates[0]) || 'unknown';
   const key = data.code + '_' + timeKey;
   const existing = bookingMap[key];
   if (!existing || (data.updated_at && (!existing.updated_at || data.updated_at >= existing.updated_at))) {
@@ -63,13 +59,10 @@ function upsertBooking(data) {
   return false;
 }
 
-function getBookings() {
-  return Object.values(bookingMap);
-}
+function getBookings() { return Object.values(bookingMap); }
 
 app.post('/webhook', function(req, res) {
-  const payload = req.body;
-  const data = payload.data || payload;
+  const data = req.body.data || req.body;
   const saved = upsertBooking(data);
   res.status(200).json({ received: true, saved: saved, total: Object.keys(bookingMap).length });
 });
@@ -91,18 +84,12 @@ app.post('/mcp', async function(req, res) {
 
   mcp.tool('get_todays_bookings', "Get today's bookings for Habitat Studios", {}, async function() {
     const today = new Date().toISOString().split('T')[0];
-    const todays = getBookings().filter(function(b) {
-      const d = b.start_time || (b.dates && b.dates[0]) || '';
-      return d.startsWith(today);
-    });
+    const todays = getBookings().filter(function(b) { return getDateStr(b).startsWith(today); });
     return { content: [{ type: 'text', text: JSON.stringify(todays) }] };
   });
 
   mcp.tool('get_bookings_for_date', 'Get bookings for a specific date (YYYY-MM-DD)', { date: { type: 'string' } }, async function({ date }) {
-    const matches = getBookings().filter(function(b) {
-      const d = b.start_time || (b.dates && b.dates[0]) || '';
-      return d.startsWith(date);
-    });
+    const matches = getBookings().filter(function(b) { return getDateStr(b).startsWith(date); });
     return { content: [{ type: 'text', text: JSON.stringify(matches) }] };
   });
 
@@ -110,16 +97,12 @@ app.post('/mcp', async function(req, res) {
     const now = new Date();
     const weekOut = new Date(now.getTime() + 7 * 24 * 60 * 60 * 1000);
     const matches = getBookings().filter(function(b) {
-      const d = b.start_time || (b.dates && b.dates[0]);
+      const d = getDateStr(b);
       if (!d) return false;
       const bd = new Date(d);
       return bd >= now && bd <= weekOut;
     });
-    matches.sort(function(a, b) {
-      const da = a.start_time || (a.dates && a.dates[0]) || '';
-      const db = b.start_time || (b.dates && b.dates[0]) || '';
-      return da > db ? 1 : -1;
-    });
+    matches.sort(function(a, b) { return getDateStr(a) > getDateStr(b) ? 1 : -1; });
     return { content: [{ type: 'text', text: JSON.stringify(matches) }] };
   });
 
@@ -137,7 +120,6 @@ app.post('/mcp', async function(req, res) {
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, function() {
   console.log('Jammed MCP server running on port ' + PORT);
-  console.log('Disk path: ' + DATA_FILE);
-  console.log('Disk exists: ' + fs.existsSync(DATA_DIR));
+  console.log('Disk: ' + DATA_FILE + ' | exists: ' + fs.existsSync(DATA_DIR));
   console.log('Bookings loaded: ' + Object.keys(bookingMap).length);
 });
