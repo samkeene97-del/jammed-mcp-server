@@ -7,5 +7,19 @@
   },
   "dependencies": {
     "express": "^4.18.2"
+{
+    "name": "jammed-mcp-server",
+    "version": "1.0.0",
+    "type": "module",
+    "main": "server.js",
+    "scripts": {
+          "start": "node server.js"
+    },
+      "dependencies": {
+            "express": "^4.18.2",
+            "@modelcontextprotocol/sdk": "^1.10.2",
+            "zod": "^3.22.4"
+      }
   }
+    }
 }
