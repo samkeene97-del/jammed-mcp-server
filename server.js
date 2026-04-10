@@ -1,6 +1,7 @@
 const express = require('express');
 const fs = require('fs');
 const path = require('path');
+const https = require('https');
 const { McpServer } = require('@modelcontextprotocol/sdk/server/mcp.js');
 const { StreamableHTTPServerTransport } = require('@modelcontextprotocol/sdk/server/streamableHttp.js');
 
@@ -18,6 +19,7 @@ app.use(express.json());
 
 const DATA_DIR = '/var/data';
 const DATA_FILE = path.join(DATA_DIR, 'bookings.json');
+const JAMMED_HOST = 'habitat-music-studios.jammed.app';
 
 if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
 
@@ -41,7 +43,6 @@ function saveBookings() {
 
 const bookingMap = loadBookings();
 
-// Get best date string from a booking regardless of Jammed API format
 function getDateStr(b) {
   return b.start || b.start_time || (b.dates && b.dates[0]) || '';
 }
@@ -53,7 +54,6 @@ function upsertBooking(data) {
   const existing = bookingMap[key];
   if (!existing || (data.updated_at && (!existing.updated_at || data.updated_at >= existing.updated_at))) {
     bookingMap[key] = data;
-    saveBookings();
     return true;
   }
   return false;
@@ -61,14 +61,63 @@ function upsertBooking(data) {
 
 function getBookings() { return Object.values(bookingMap); }
 
+// Poll Jammed API for a date range and upsert all bookings
+function pollJammedRange(from, to) {
+  return new Promise(function(resolve) {
+    const path = '/admin/api/v1/bookings/by_dates.json?from=' + from + '&to=' + to;
+    const options = {
+      hostname: JAMMED_HOST,
+      path: path,
+      method: 'GET',
+      headers: { 'Accept': 'application/json' }
+    };
+    const req = https.request(options, function(res) {
+      let body = '';
+      res.on('data', function(chunk) { body += chunk; });
+      res.on('end', function() {
+        try {
+          const data = JSON.parse(body);
+          const bookings = Array.isArray(data) ? data : (data.bookings || []);
+          let count = 0;
+          bookings.forEach(function(b) { if (upsertBooking(b)) count++; });
+          if (count > 0) { saveBookings(); console.log('Poll ' + from + ' to ' + to + ': ' + count + ' new/updated'); }
+          resolve(bookings.length);
+        } catch(e) { console.error('Poll parse error:', e.message); resolve(0); }
+      });
+    });
+    req.on('error', function(e) { console.error('Poll error:', e.message); resolve(0); });
+    req.end();
+  });
+}
+
+// Every 2 hours: poll the next 60 days from Jammed to catch any missed webhooks
+async function scheduledPoll() {
+  console.log('Running scheduled poll...');
+  const now = new Date();
+  // Poll past 7 days + next 60 days to catch recent additions and future bookings
+  const from = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000).toISOString().split('T')[0];
+  const to = new Date(now.getTime() + 60 * 24 * 60 * 60 * 1000).toISOString().split('T')[0];
+  await pollJammedRange(from, to);
+  console.log('Scheduled poll complete. Total bookings: ' + Object.keys(bookingMap).length);
+}
+
+// Run on startup then every 2 hours
+scheduledPoll();
+setInterval(scheduledPoll, 2 * 60 * 60 * 1000);
+
 app.post('/webhook', function(req, res) {
   const data = req.body.data || req.body;
   const saved = upsertBooking(data);
+  if (saved) saveBookings();
   res.status(200).json({ received: true, saved: saved, total: Object.keys(bookingMap).length });
 });
 
 app.get('/bookings', function(req, res) { res.json(getBookings()); });
 app.get('/bookings/count', function(req, res) { res.json({ count: Object.keys(bookingMap).length }); });
+app.get('/poll', async function(req, res) {
+  await scheduledPoll();
+  res.json({ done: true, total: Object.keys(bookingMap).length });
+});
 app.delete('/bookings', function(req, res) {
   Object.keys(bookingMap).forEach(function(k) { delete bookingMap[k]; });
   saveBookings();
@@ -97,10 +146,8 @@ app.post('/mcp', async function(req, res) {
     const now = new Date();
     const weekOut = new Date(now.getTime() + 7 * 24 * 60 * 60 * 1000);
     const matches = getBookings().filter(function(b) {
-      const d = getDateStr(b);
-      if (!d) return false;
-      const bd = new Date(d);
-      return bd >= now && bd <= weekOut;
+      const d = getDateStr(b); if (!d) return false;
+      const bd = new Date(d); return bd >= now && bd <= weekOut;
     });
     matches.sort(function(a, b) { return getDateStr(a) > getDateStr(b) ? 1 : -1; });
     return { content: [{ type: 'text', text: JSON.stringify(matches) }] };
