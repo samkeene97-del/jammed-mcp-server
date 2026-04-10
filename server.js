@@ -5,6 +5,16 @@ const { McpServer } = require('@modelcontextprotocol/sdk/server/mcp.js');
 const { StreamableHTTPServerTransport } = require('@modelcontextprotocol/sdk/server/streamableHttp.js');
 
 const app = express();
+
+// Allow CORS from anywhere (needed for Jammed admin import)
+app.use(function(req, res, next) {
+  res.header('Access-Control-Allow-Origin', '*');
+  res.header('Access-Control-Allow-Methods', 'GET, POST, DELETE, OPTIONS');
+  res.header('Access-Control-Allow-Headers', 'Content-Type');
+  if (req.method === 'OPTIONS') return res.sendStatus(200);
+  next();
+});
+
 app.use(express.json());
 
 const DATA_DIR = '/var/data';
@@ -22,10 +32,10 @@ function loadBookings() {
       console.log('Loaded ' + Object.keys(data).length + ' bookings from disk');
       return data;
     } else {
-      console.log('No bookings file found on disk, starting fresh');
+      console.log('No bookings file on disk yet - starting fresh');
     }
   } catch (e) {
-    console.error('Failed to load bookings from disk:', e.message);
+    console.error('Failed to load bookings:', e.message);
   }
   return {};
 }
@@ -42,8 +52,7 @@ const bookingMap = loadBookings();
 
 function upsertBooking(data) {
   if (!data || !data.code) return false;
-  // Use code + start_at (unix) as key — most reliable unique identifier
-  const timeKey = data.start_at || data.start_time || data.dates && data.dates[0] || 'unknown';
+  const timeKey = data.start_at || data.start_time || (data.dates && data.dates[0]) || 'unknown';
   const key = data.code + '_' + timeKey;
   const existing = bookingMap[key];
   if (!existing || (data.updated_at && (!existing.updated_at || data.updated_at >= existing.updated_at))) {
@@ -58,55 +67,55 @@ function getBookings() {
   return Object.values(bookingMap);
 }
 
-app.post('/webhook', (req, res) => {
+app.post('/webhook', function(req, res) {
   const payload = req.body;
   const data = payload.data || payload;
   const saved = upsertBooking(data);
   res.status(200).json({ received: true, saved: saved, total: Object.keys(bookingMap).length });
 });
 
-app.get('/bookings', (req, res) => res.json(getBookings()));
-app.get('/bookings/count', (req, res) => res.json({ count: Object.keys(bookingMap).length }));
-app.delete('/bookings', (req, res) => {
-  Object.keys(bookingMap).forEach(k => delete bookingMap[k]);
+app.get('/bookings', function(req, res) { res.json(getBookings()); });
+app.get('/bookings/count', function(req, res) { res.json({ count: Object.keys(bookingMap).length }); });
+app.delete('/bookings', function(req, res) {
+  Object.keys(bookingMap).forEach(function(k) { delete bookingMap[k]; });
   saveBookings();
   res.json({ cleared: true });
 });
 
-app.post('/mcp', async (req, res) => {
+app.post('/mcp', async function(req, res) {
   const mcp = new McpServer({ name: 'jammed-bookings', version: '1.0.0' });
 
-  mcp.tool('get_bookings', 'Get all Habitat Studios bookings', {}, async () => ({
-    content: [{ type: 'text', text: JSON.stringify(getBookings()) }]
-  }));
+  mcp.tool('get_bookings', 'Get all Habitat Studios bookings', {}, async function() {
+    return { content: [{ type: 'text', text: JSON.stringify(getBookings()) }] };
+  });
 
-  mcp.tool('get_todays_bookings', "Get today's bookings for Habitat Studios", {}, async () => {
+  mcp.tool('get_todays_bookings', "Get today's bookings for Habitat Studios", {}, async function() {
     const today = new Date().toISOString().split('T')[0];
-    const todays = getBookings().filter(b => {
+    const todays = getBookings().filter(function(b) {
       const d = b.start_time || (b.dates && b.dates[0]) || '';
       return d.startsWith(today);
     });
     return { content: [{ type: 'text', text: JSON.stringify(todays) }] };
   });
 
-  mcp.tool('get_bookings_for_date', 'Get bookings for a specific date (YYYY-MM-DD)', { date: { type: 'string' } }, async ({ date }) => {
-    const matches = getBookings().filter(b => {
+  mcp.tool('get_bookings_for_date', 'Get bookings for a specific date (YYYY-MM-DD)', { date: { type: 'string' } }, async function({ date }) {
+    const matches = getBookings().filter(function(b) {
       const d = b.start_time || (b.dates && b.dates[0]) || '';
       return d.startsWith(date);
     });
     return { content: [{ type: 'text', text: JSON.stringify(matches) }] };
   });
 
-  mcp.tool('get_bookings_for_week', 'Get bookings for the next 7 days', {}, async () => {
+  mcp.tool('get_bookings_for_week', 'Get bookings for the next 7 days', {}, async function() {
     const now = new Date();
     const weekOut = new Date(now.getTime() + 7 * 24 * 60 * 60 * 1000);
-    const matches = getBookings().filter(b => {
+    const matches = getBookings().filter(function(b) {
       const d = b.start_time || (b.dates && b.dates[0]);
       if (!d) return false;
       const bd = new Date(d);
       return bd >= now && bd <= weekOut;
     });
-    matches.sort((a, b) => {
+    matches.sort(function(a, b) {
       const da = a.start_time || (a.dates && a.dates[0]) || '';
       const db = b.start_time || (b.dates && b.dates[0]) || '';
       return da > db ? 1 : -1;
@@ -114,8 +123,8 @@ app.post('/mcp', async (req, res) => {
     return { content: [{ type: 'text', text: JSON.stringify(matches) }] };
   });
 
-  mcp.tool('clear_bookings', 'Clear all stored bookings', {}, async () => {
-    Object.keys(bookingMap).forEach(k => delete bookingMap[k]);
+  mcp.tool('clear_bookings', 'Clear all stored bookings', {}, async function() {
+    Object.keys(bookingMap).forEach(function(k) { delete bookingMap[k]; });
     saveBookings();
     return { content: [{ type: 'text', text: 'Bookings cleared' }] };
   });
@@ -126,7 +135,7 @@ app.post('/mcp', async (req, res) => {
 });
 
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => {
+app.listen(PORT, function() {
   console.log('Jammed MCP server running on port ' + PORT);
   console.log('Disk path: ' + DATA_FILE);
   console.log('Disk exists: ' + fs.existsSync(DATA_DIR));
